@@ -1,0 +1,85 @@
+# This is a 2-stage Docker build.  In the first stage, we build a
+# aloha development environment image and use
+# tools/build-release-tarball to generate a production release tarball
+# from the provided Git ref.
+FROM ubuntu:20.04 as base
+
+# Set up working locales and upgrade the base image
+ENV LANG="C.UTF-8"
+
+ARG UBUNTU_MIRROR
+
+RUN { [ ! "$UBUNTU_MIRROR" ] || sed -i "s|http://\(\w*\.\)*archive\.ubuntu\.com/ubuntu/\? |$UBUNTU_MIRROR |" /etc/apt/sources.list; } && \
+    apt-get -q update && \
+    apt-get -q dist-upgrade -y && \
+    DEBIAN_FRONTEND=noninteractive \
+        apt-get -q install --no-install-recommends -y ca-certificates git locales lsb-release python3 sudo tzdata
+
+
+FROM base as build
+
+# Add a aloha user
+RUN useradd -d /home/aloha -m aloha && \
+    echo 'aloha ALL=(ALL:ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+USER aloha
+WORKDIR /home/aloha
+
+# You can specify these in docker-compose.yml or with
+#   docker build --build-arg "aloha_GIT_REF=git_branch_name" .
+ARG aloha_GIT_URL=https://github.com/dyhes/aloha.git
+ARG aloha_GIT_REF=main
+
+RUN git clone "$aloha_GIT_URL" && \
+    cd aloha && \
+    git checkout -b current "$aloha_GIT_REF"
+
+WORKDIR /home/aloha/aloha
+
+ARG CUSTOM_CA_CERTIFICATES
+
+# Finally, we provision the development environment and build a release tarball
+RUN SKIP_VENV_SHELL_WARNING=1 ./tools/provision --build-release-tarball-only
+RUN . /srv/aloha-py3-venv/bin/activate && \
+    ./tools/build-release-tarball docker && \
+    mv /tmp/tmp.*/aloha-server-docker.tar.gz /tmp/aloha-server-docker.tar.gz
+
+
+# In the second stage, we build the production image from the release tarball
+FROM base
+
+ENV DATA_DIR="/data"
+
+# Then, with a second image, we install the production release tarball.
+COPY --from=build /tmp/aloha-server-docker.tar.gz /root/
+COPY custom_aloha_files/ /root/custom_aloha
+
+ARG CUSTOM_CA_CERTIFICATES
+
+RUN \
+    # Make sure Nginx is started by Supervisor.
+    dpkg-divert --add --rename /etc/init.d/nginx && \
+    ln -s /bin/true /etc/init.d/nginx && \
+    mkdir -p "$DATA_DIR" && \
+    cd /root && \
+    tar -xf aloha-server-docker.tar.gz && \
+    rm -f aloha-server-docker.tar.gz && \
+    mv aloha-server-docker aloha && \
+    cp -rf /root/custom_aloha/* /root/aloha && \
+    rm -rf /root/custom_aloha && \
+    export PUPPET_CLASSES="aloha::profile::docker" \
+           ADDITIONAL_PACKAGES="expect" && \
+    /root/aloha/scripts/setup/install --hostname="$(hostname)" --email="docker-aloha" --no-init-db && \
+    rm -f /etc/aloha/aloha-secrets.conf /etc/aloha/settings.py && \
+    apt-get -qq autoremove --purge -y && \
+    apt-get -qq clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+COPY entrypoint.sh /sbin/entrypoint.sh
+COPY certbot-deploy-hook /sbin/certbot-deploy-hook
+
+VOLUME ["$DATA_DIR"]
+EXPOSE 80 443
+
+ENTRYPOINT ["/sbin/entrypoint.sh"]
+CMD ["app:run"]

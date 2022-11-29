@@ -1,0 +1,27 @@
+{{- if .Values.aloha.persistence.enabled -}}
+{{- if not .Values.aloha.persistence.existingClaim -}}
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: {{ template "aloha.fullname" . }}-data
+  labels:
+    {{- include "aloha.labels" . | nindent 4 }}
+{{- if .Values.aloha.persistence.annotations }}
+  annotations:
+{{ toYaml .Values.aloha.persistence.annotations | indent 4 }}
+{{- end }}
+spec:
+  accessModes:
+    - {{ .Values.aloha.persistence.accessMode | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.aloha.persistence.size | quote }}
+{{- if .Values.aloha.persistence.storageClass }}
+{{- if (eq "-" .Values.aloha.persistence.storageClass) }}
+  storageClassName: ""
+{{- else }}
+  storageClassName: "{{ .Values.aloha.persistence.storageClass }}"
+{{- end }}
+{{- end }}
+{{- end -}}
+{{- end -}}
