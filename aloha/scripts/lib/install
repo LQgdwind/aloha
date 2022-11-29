@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+set -e
+
+usage() {
+    # A subset of this documentation also appears in docs/production/install.md
+    cat <<'EOF'
+Usage:
+  install --hostname=aloha.example.com --email=aloha-admin@example.com [options...]
+  install --help
+
+Options:
+  --hostname=aloha.example.com
+      The user-accessible domain name for this Aloha server, i.e., what users will type
+      in their web browser.  Required, unless --no-init-db is set and --certbot is not.
+  --email=aloha-admin@example.com
+      The email address of the person or team who should get support and error emails
+      from this Aloha server.  Required, unless --no-init-db is set and --certbot is
+      not.
+
+  --certbot
+      Obtains a free SSL certificate for the server using Certbot,
+      https://certbot.eff.org/  Recommended.  Conflicts with --self-signed-cert.
+  --self-signed-cert
+      Generate a self-signed SSL certificate for the server. This isn’t suitable for
+      production use, but may be convenient for testing.  Conflicts with --certbot.
+  --cacert=/path/to/ca.pem
+      Set the CA which used to establish TLS to all public internet sites during the
+      install process; used when this command is run once in a highly-controlled
+      environment to produce an image which is used elsewhere.  Uncommon.
+
+  --postgresql-database-name=aloha
+      Sets the PostgreSQL database name.
+  --postgresql-database-user=aloha
+      Sets the PostgreSQL database user.
+  --postgresql-version=14
+      Sets the version of PostgreSQL that will be installed.
+  --postgresql-missing-dictionaries
+      Set postgresql.missing_dictionaries, which alters the initial database.  Use with
+      cloud managed databases like RDS.  Conflicts with --no-overwrite-settings.
+  --no-init-db
+      Does not do any database initialization; use when you already have a Aloha
+      database.
+
+  --no-overwrite-settings
+      Preserve existing `/etc/aloha` configuration files.
+  --no-dist-upgrade
+      Skip the initial `apt-get dist-upgrade`.
+
+EOF
+}
+
+# Shell option parsing.  Over time, we'll want to move some of the
+# environment variables below into this self-documenting system.
+args="$(getopt -o '' --long help,hostname:,email:,certbot,self-signed-cert,cacert:,postgresql-database-name:,postgresql-database-user:,postgresql-version:,postgresql-missing-dictionaries,no-init-db,no-overwrite-settings,no-dist-upgrade -n "$0" -- "$@")"
+eval "set -- $args"
+while true; do
+    case "$1" in
+        --help)
+            usage
+            exit 0
+            ;;
+
+        --hostname)
+            EXTERNAL_HOST="$2"
+            shift
+            shift
+            ;;
+        --email)
+            aloha_ADMINISTRATOR="$2"
+            shift
+            shift
+            ;;
+
+        --certbot)
+            USE_CERTBOT=1
+            shift
+            ;;
+        --cacert)
+            export CUSTOM_CA_CERTIFICATES="$2"
+            shift
+            shift
+            ;;
+        --self-signed-cert)
+            SELF_SIGNED_CERT=1
+            shift
+            ;;
+        --postgresql-database-name)
+            POSTGRESQL_DATABASE_NAME="$2"
+            shift
+            shift
+            ;;
+        --postgresql-database-user)
+            POSTGRESQL_DATABASE_USER="$2"
+            shift
+            shift
+            ;;
+        --postgresql-version)
+            POSTGRESQL_VERSION="$2"
+            shift
+            shift
+            ;;
+        --postgresql-missing-dictionaries)
+            POSTGRESQL_MISSING_DICTIONARIES=1
+            shift
+            ;;
+        --no-init-db)
+            NO_INIT_DB=1
+            shift
+            ;;
+
+        --no-overwrite-settings)
+            NO_OVERWRITE_SETTINGS=1
+            shift
+            ;;
+        --no-dist-upgrade)
+            NO_DIST_UPGRADE=1
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+    esac
+done
+
+if [ "$#" -gt 0 ]; then
+    usage >&2
+    exit 1
+fi
+
+## Options from environment variables.
+#
+# Specify options for apt.
+read -r -a APT_OPTIONS <<<"${APT_OPTIONS:-}"
+# Install additional packages.
+read -r -a ADDITIONAL_PACKAGES <<<"${ADDITIONAL_PACKAGES:-}"
+# Comma-separated list of Puppet manifests to install.  The default is
+# aloha::profile::standalone for an all-in-one system or
+# aloha::profile::docker for Docker.  Use
+# e.g. aloha::profile::app_frontend for a Aloha frontend server.
+PUPPET_CLASSES="${PUPPET_CLASSES:-aloha::profile::standalone}"
+VIRTUALENV_NEEDED="${VIRTUALENV_NEEDED:-yes}"
+POSTGRESQL_VERSION="${POSTGRESQL_VERSION:-14}"
+
+if [ -n "$SELF_SIGNED_CERT" ] && [ -n "$USE_CERTBOT" ]; then
+    set +x
+    echo "error: --self-signed-cert and --certbot are incompatible" >&2
+    echo >&2
+    usage >&2
+    exit 1
+fi
+
+if [ -n "$POSTGRESQL_MISSING_DICTIONARIES" ] && [ -n "$NO_OVERWRITE_SETTINGS" ]; then
+    set +x
+    echo "error: --postgresql-missing-dictionaries and --no-overwrite-settings are incompatible" >&2
+    echo >&2
+    usage >&2
+    exit 1
+fi
+
+if [ -z "$EXTERNAL_HOST" ] || [ -z "$aloha_ADMINISTRATOR" ]; then
+    if [ -n "$USE_CERTBOT" ] || [ -z "$NO_INIT_DB" ]; then
+        usage >&2
+        exit 1
+    fi
+fi
+
+if [ "$EXTERNAL_HOST" = aloha.example.com ] \
+    || [ "$aloha_ADMINISTRATOR" = aloha-admin@example.com ]; then
+    # These example values are specifically checked for and would fail
+    # later; see check_config in zerver/lib/management.py.
+    echo 'error: The example hostname and email must be replaced with real values.' >&2
+    echo >&2
+    usage >&2
+    exit 1
+fi
+
+case "$POSTGRESQL_VERSION" in
+    [0-9] | [0-9].* | 10 | 10.*)
+        echo "error: PostgreSQL 11 or newer is required." >&2
+        exit 1
+        ;;
+esac
+
+# Do set -x after option parsing is complete
+set -x
+
+aloha_PATH="$(readlink -f "$(dirname "$0")"/../..)"
+
+# Force a known locale.  Some packages on PyPI fail to install in some locales.
+export LC_ALL="C.UTF-8"
+export LANG="C.UTF-8"
+export LANGUAGE="C.UTF-8"
+
+# Force a known path; this fixes problems on Debian where `su` from
+# non-root may not adjust `$PATH` to root's.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Check for a supported OS release.
+if [ -f /etc/os-release ]; then
+    os_info="$(
+        . /etc/os-release
+        printf '%s\n' "$ID" "$ID_LIKE" "$VERSION_ID" "$VERSION_CODENAME"
+    )"
+    {
+        read -r os_id
+        read -r os_id_like
+        read -r os_version_id
+        read -r os_version_codename || true
+    } <<<"$os_info"
+    case " $os_id $os_id_like " in
+        *' debian '*)
+            package_system="apt"
+            ;;
+        *' rhel '*)
+            package_system="yum"
+            ;;
+    esac
+fi
+
+case "$os_id $os_version_id" in
+    'debian 11' | 'ubuntu 20.04' | 'ubuntu 22.04') ;;
+    *)
+        set +x
+        cat <<EOF
+
+Unsupported OS release: $os_id $os_version_id
+
+Aloha in production is supported only on:
+ - Debian 11
+ - Ubuntu 20.04 LTS
+ - Ubuntu 22.04 LTS
+
+For more information, see:
+  https://aloha.readthedocs.io/en/latest/production/requirements.html
+EOF
+        exit 1
+        ;;
+esac
+
+has_universe() {
+    apt-cache policy \
+        | grep -q "^     release v=$os_version_id,o=Ubuntu,a=$os_version_codename,n=$os_version_codename,l=Ubuntu,c=universe"
+}
+
+if [ "$os_id" = ubuntu ] && ! has_universe && ! { apt-get update && has_universe; }; then
+    set +x
+    cat <<'EOF'
+
+You must enable the Ubuntu Universe repository before installing
+Aloha.  You can do this with:
+
+    sudo add-apt-repository universe
+    sudo apt update
+
+For more information, see:
+  https://aloha.readthedocs.io/en/latest/production/requirements.html
+EOF
+    exit 1
+fi
+
+case ",$PUPPET_CLASSES," in
+    *,aloha::profile::standalone,* | *,aloha::profile::postgresql,*)
+        if [ "$package_system" = apt ]; then
+            # We're going to install PostgreSQL from the PostgreSQL apt
+            # repository; this may conflict with the existing PostgreSQL.
+            OTHER_PG="$(dpkg --get-selections \
+                | grep -E '^postgresql-[0-9]+\s+install$' \
+                | grep -v "^postgresql-$POSTGRESQL_VERSION\b" \
+                | cut -f 1)" || true
+            if [ -n "$OTHER_PG" ]; then
+                INDENTED="${OTHER_PG//$'\n'/$'\n'    }"
+                SPACED="${OTHER_PG//$'\n'/ }"
+                cat <<EOF
+
+The following PostgreSQL servers were found to already be installed:
+
+    $INDENTED
+
+Aloha needs to install PostgreSQL $POSTGRESQL_VERSION, but does not wish
+to uninstall existing databases in order to do so.  Remove all other
+PostgreSQL servers manually before running the installer:
+
+    sudo apt-get remove $SPACED
+
+EOF
+                exit 1
+            fi
+        fi
+        ;;
+esac
+
+# Check for at least ~1.86GB of RAM before starting installation;
+# otherwise users will find out about insufficient RAM via weird
+# errors like a segfault running `pip install`.
+# Additionally, some AWS images that are advertised to be 2 GB
+# are actually 1880000B in size.
+mem_kb=$(head -n1 /proc/meminfo | awk '{print $2}')
+if [ "$mem_kb" -lt 1860000 ]; then
+    set +x
+    echo -e '\033[0;31m' >&2
+    echo "Insufficient RAM.  Aloha requires at least 2GB of RAM." >&2
+    echo >&2
+    echo -e '\033[0m' >&2
+    exit 1
+fi
+
+# Do package update, e.g. do `apt-get update` on Debian
+if [ "$package_system" = apt ]; then
+    # setup-apt-repo does an `apt-get update`
+    "$aloha_PATH"/scripts/lib/setup-apt-repo
+elif [ "$package_system" = yum ]; then
+    "$aloha_PATH"/scripts/lib/setup-yum-repo
+fi
+
+# Check early for missing SSL certificates
+if [ "$PUPPET_CLASSES" = "aloha::profile::standalone" ] && [ -z "$USE_CERTBOT""$SELF_SIGNED_CERT" ] && { ! [ -e "/etc/ssl/private/aloha.key" ] || ! [ -e "/etc/ssl/certs/aloha.combined-chain.crt" ]; }; then
+    set +x
+    cat <<EOF
+
+No SSL certificate found.  One or both required files is missing:
+    /etc/ssl/private/aloha.key
+    /etc/ssl/certs/aloha.combined-chain.crt
+
+Suggested solutions:
+ * For most sites, the --certbot option is recommended.
+ * If you have your own key and cert, see docs linked below
+   for how to install them.
+ * For non-production testing, try the --self-signed-cert option.
+
+For help and more details, see our SSL documentation:
+  https://aloha.readthedocs.io/en/latest/production/ssl-certificates.html
+
+Once fixed, just rerun scripts/setup/install; it'll pick up from here!
+
+EOF
+    exit 1
+fi
+
+# don't run dist-upgrade in one click apps to make the
+# installation process more seamless.
+if [ -z "$NO_DIST_UPGRADE" ]; then
+    if [ "$package_system" = apt ]; then
+        apt-get -y dist-upgrade "${APT_OPTIONS[@]}"
+    elif [ "$package_system" = yum ]; then
+        # On CentOS, there is no need to do `yum -y upgrade` because `yum -y
+        # update` already does the same thing.
+        :
+    fi
+fi
+
+if [ "$package_system" = apt ]; then
+    # Note that any additions to these lists must also be added to
+    # `aloha::profile::base` such that the new dependency is seen by
+    # upgrades, as well as new installs.
+    if ! apt-get install -y \
+        python3 python3-yaml puppet git curl jq crudini \
+        "${ADDITIONAL_PACKAGES[@]}"; then
+        set +x
+        echo -e '\033[0;31m' >&2
+        echo "Installing packages failed; is network working and (on Ubuntu) the universe repository enabled?" >&2
+        echo >&2
+        echo -e '\033[0m' >&2
+        exit 1
+    fi
+elif [ "$package_system" = yum ]; then
+    if ! yum install -y \
+        python3 python3-pyyaml puppet git curl jq crudini \
+        "${ADDITIONAL_PACKAGES[@]}"; then
+        set +x
+        echo -e '\033[0;31m' >&2
+        echo "Installing packages failed; is network working?" >&2
+        echo >&2
+        echo -e '\033[0m' >&2
+        exit 1
+    fi
+fi
+
+# We generate a self-signed cert even with certbot, so we can use the
+# webroot authenticator, which requires nginx be set up with a
+# certificate.
+if [ -n "$SELF_SIGNED_CERT" ] || [ -n "$USE_CERTBOT" ]; then
+    "$aloha_PATH"/scripts/setup/generate-self-signed-cert \
+        --exists-ok "${EXTERNAL_HOST:-$(hostname)}"
+fi
+
+# Create and activate a virtualenv
+if [ "$VIRTUALENV_NEEDED" = "yes" ]; then
+    "$aloha_PATH"/scripts/lib/create-production-venv "$aloha_PATH"
+fi
+
+"$aloha_PATH"/scripts/lib/install-node
+"$aloha_PATH"/scripts/lib/install-yarn
+
+# Generate /etc/aloha/aloha.conf .
+mkdir -p /etc/aloha
+has_class() {
+    grep -qx "$1" /var/lib/puppet/classes.txt
+}
+
+# puppet apply --noop fails unless the user that it _would_ chown
+# files to exists; https://tickets.puppetlabs.com/browse/PUP-3907
+#
+# The home directory here should match what's declared in base.pp.
+id -u aloha &>/dev/null || useradd -m aloha --home-dir /home/aloha
+if [ -n "$NO_OVERWRITE_SETTINGS" ] && [ -e "/etc/aloha/aloha.conf" ]; then
+    "$aloha_PATH"/scripts/aloha-puppet-apply --noop \
+        --write-catalog-summary \
+        --classfile=/var/lib/puppet/classes.txt
+else
+    # Write out more than we need, and remove sections that are not
+    # applicable to the classes that are actually necessary.
+    cat <<EOF >/etc/aloha/aloha.conf
+[machine]
+puppet_classes = $PUPPET_CLASSES
+deploy_type = production
+
+[postgresql]
+version = $POSTGRESQL_VERSION
+EOF
+
+    if [ -n "$POSTGRESQL_MISSING_DICTIONARIES" ]; then
+        crudini --set /etc/aloha/aloha.conf postgresql missing_dictionaries true
+    fi
+
+    "$aloha_PATH"/scripts/aloha-puppet-apply --noop \
+        --write-catalog-summary \
+        --classfile=/var/lib/puppet/classes.txt
+
+    # We only need the PostgreSQL version setting on database hosts; but
+    # we don't know if this is a database host until we have the catalog summary.
+    if ! has_class "aloha::postgresql_common" || [ "$package_system" != apt ]; then
+        crudini --del /etc/aloha/aloha.conf postgresql
+    fi
+
+    if [ -n "$POSTGRESQL_DATABASE_NAME" ]; then
+        crudini --set /etc/aloha/aloha.conf postgresql database_name "$POSTGRESQL_DATABASE_NAME"
+    fi
+
+    if [ -n "$POSTGRESQL_DATABASE_USER" ]; then
+        crudini --set /etc/aloha/aloha.conf postgresql database_user "$POSTGRESQL_DATABASE_USER"
+    fi
+fi
+
+if has_class "aloha::app_frontend_base"; then
+    if [ -z "$NO_OVERWRITE_SETTINGS" ] || ! [ -e "/etc/aloha/settings.py" ]; then
+        cp -a "$aloha_PATH"/zproject/prod_settings_template.py /etc/aloha/settings.py
+        if [ -n "$EXTERNAL_HOST" ]; then
+            sed -i "s/^EXTERNAL_HOST =.*/EXTERNAL_HOST = '$EXTERNAL_HOST'/" /etc/aloha/settings.py
+        fi
+        if [ -n "$aloha_ADMINISTRATOR" ]; then
+            sed -i "s/^aloha_ADMINISTRATOR =.*/aloha_ADMINISTRATOR = '$aloha_ADMINISTRATOR'/" /etc/aloha/settings.py
+        fi
+    fi
+    ln -nsf /etc/aloha/settings.py "$aloha_PATH"/zproject/prod_settings.py
+    "$aloha_PATH"/scripts/setup/generate_secrets.py --production
+fi
+
+"$aloha_PATH"/scripts/aloha-puppet-apply -f
+
+if [ "$package_system" = apt ]; then
+    apt-get -y --with-new-pkgs upgrade
+elif [ "$package_system" = yum ]; then
+    # No action is required because `yum update` already does upgrade.
+    :
+fi
+
+if [ -n "$USE_CERTBOT" ]; then
+    "$aloha_PATH"/scripts/setup/setup-certbot \
+        "$EXTERNAL_HOST" --email "$aloha_ADMINISTRATOR"
+fi
+
+if has_class "aloha::nginx" && ! has_class "aloha::profile::docker"; then
+    # Check nginx was configured properly now that we've installed it.
+    # Most common failure mode is certs not having been installed.
+    if ! nginx -t; then
+        (
+            set +x
+            cat <<EOF
+
+Verifying the Aloha nginx configuration failed!
+
+This is almost always a problem with your SSL certificates.  See:
+  https://aloha.readthedocs.io/en/latest/production/ssl-certificates.html
+
+Once fixed, just rerun scripts/setup/install; it'll pick up from here!
+
+EOF
+            exit 1
+        )
+    fi
+fi
+
+if has_class "aloha::profile::rabbitmq"; then
+    if ! rabbitmqctl status >/dev/null; then
+        set +x
+        cat <<EOF
+
+RabbitMQ seems to not have started properly after the installation process.
+Often this is caused by misconfigured /etc/hosts in virtualized environments.
+For more information, see:
+  https://github.com/aloha/aloha/issues/53#issuecomment-143805121
+
+EOF
+        exit 1
+    fi
+fi
+
+# Set up a basic .gitconfig for the 'aloha' user
+if [ -n "$aloha_ADMINISTRATOR" ]; then
+    (
+        cd / # Make sure the current working directory is readable by aloha
+        su aloha -c "git config --global user.email $aloha_ADMINISTRATOR"
+        su aloha -c "git config --global user.name 'Aloha Server ($EXTERNAL_HOST)'"
+    )
+fi
+
+if ! has_class "aloha::app_frontend_base"; then
+    set +x
+    cat <<EOF
+
+Success!
+
+Not configuring PostgreSQL, or /home/aloha/deployments, because this
+is not a front-end install.
+
+EOF
+    exit 0
+fi
+
+# Frontend deploys use /home/aloha/deployments; without this, the
+# install directory is also only readable by root.
+deploy_path=$("$aloha_PATH"/scripts/lib/aloha_tools.py make_deploy_path)
+mv "$aloha_PATH" "$deploy_path"
+ln -nsf /home/aloha/deployments/next "$aloha_PATH"
+ln -nsf "$deploy_path" /home/aloha/deployments/next
+ln -nsf "$deploy_path" /home/aloha/deployments/current
+ln -nsf /etc/aloha/settings.py "$deploy_path"/zproject/prod_settings.py
+mkdir -p "$deploy_path"/prod-static/serve
+cp -rT "$deploy_path"/prod-static/serve /home/aloha/prod-static
+chown -R aloha:aloha /home/aloha /var/log/aloha /etc/aloha/settings.py
+
+if ! [ -e "/home/aloha/prod-static/generated" ]; then
+    # If we're installing from a Git checkout, we need to run
+    # `tools/update-prod-static` in order to build the static
+    # assets.
+    su aloha -c '/home/aloha/deployments/current/tools/update-prod-static'
+fi
+
+if [ -n "$NO_INIT_DB" ]; then
+    set +x
+    cat <<EOF
+
+Success!
+
+Stopping because --no-init-db was passed.  To complete the
+installation, configure PostgreSQL by creating the database and
+database user, and then run:
+
+   su aloha -c '/home/aloha/deployments/current/scripts/setup/initialize-database'
+   su aloha -c '/home/aloha/deployments/current/manage.py generate_realm_creation_link'
+EOF
+    exit 0
+else
+    /home/aloha/deployments/current/scripts/setup/create-database
+    su aloha -c '/home/aloha/deployments/current/scripts/setup/initialize-database --quiet'
+    su aloha -c '/home/aloha/deployments/current/manage.py generate_realm_creation_link'
+fi

@@ -1,0 +1,41 @@
+/var/log/aloha/analytics.log
+/var/log/aloha/auth.log
+/var/log/aloha/digest.log
+/var/log/aloha/email_deliverer.log
+/var/log/aloha/email_content.log
+/var/log/aloha/email_mirror.log
+/var/log/aloha/errors.log
+/var/log/aloha/ldap.log
+/var/log/aloha/manage.log
+/var/log/aloha/message_retention.log
+/var/log/aloha/deliver_scheduled_messages.log
+/var/log/aloha/send_email.log
+/var/log/aloha/smokescreen.log
+/var/log/aloha/slow_queries.log
+/var/log/aloha/soft_deactivation.log
+/var/log/aloha/sync_ldap_user_data.log
+/var/log/aloha/webhooks_errors.log
+/var/log/aloha/webhooks_unsupported_events.log
+/var/log/aloha/workers.log
+{
+    missingok
+    rotate 3
+    size 25M
+    compress
+    delaycompress
+    notifempty
+    create 644 aloha aloha
+}
+
+/var/log/aloha/tornado-*.log
+/var/log/aloha/tornado.log
+/var/log/aloha/server.log
+{
+    missingok
+    rotate 10
+    size 500M
+    compress
+    delaycompress
+    notifempty
+    create 644 aloha aloha
+}

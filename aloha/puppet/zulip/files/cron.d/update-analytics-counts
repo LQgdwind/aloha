@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USER=aloha
+
+# Run update analytics tables every 5 minutes past the hour
+5 * * * * aloha /home/aloha/deployments/current/manage.py update_analytics_counts

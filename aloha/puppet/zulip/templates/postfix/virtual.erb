@@ -1,0 +1,7 @@
+if /@<%= Regexp.escape(@postfix_mailname) %>\.?$/
+# Changes to this list require a corresponding change to `access` as
+# well.
+/\+.*@/     aloha@localhost
+/\..*@/     aloha@localhost
+/^mm.{32}@/ aloha@localhost
+endif

@@ -1,0 +1,5 @@
+{% if create_realm %}
+{{ _("Create your Aloha organization") }}
+{% else %}
+{{ _("Activate your Aloha account") }}
+{% endif %}

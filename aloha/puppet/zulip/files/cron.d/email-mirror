@@ -1,0 +1,3 @@
+MAILTO=root
+
+* * * * *   aloha cd /home/aloha/deployments/current && ./manage.py email_mirror

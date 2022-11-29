@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USER=aloha
+
+# Cron job to restart the Aloha server weekly, with the goal of
+# minimizing the impact of any memory leaks that we might grow.
+0 6 * * 7 aloha /home/aloha/deployments/current/scripts/restart-server --fill-cache

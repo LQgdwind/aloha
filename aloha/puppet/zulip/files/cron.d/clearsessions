@@ -1,0 +1,4 @@
+MAILTO=root
+
+# Clear all expired Django sessions at 10:22 PM every day.
+22 22 * * *   aloha cd /home/aloha/deployments/current && ./manage.py clearsessions

@@ -1,0 +1,36 @@
+<% if @nginx_http_only -%>
+<% else -%>
+server {
+    listen 80;
+    listen [::]:80;
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+
+    include /etc/nginx/aloha-include/certbot;
+}
+<% end -%>
+
+include /etc/nginx/aloha-include/upstreams;
+include /etc/aloha/nginx_sharding_map.conf;
+
+server {
+<% if @nginx_http_only -%>
+    listen <%= @nginx_listen_port %>;
+    listen [::]:<%= @nginx_listen_port %>;
+<% else -%>
+    listen <%= @nginx_listen_port %> ssl http2;
+    listen [::]:<%= @nginx_listen_port %> ssl http2;
+
+    ssl_certificate <%= @ssl_dir %>/certs/aloha.combined-chain.crt;
+    ssl_certificate_key <%= @ssl_dir %>/private/aloha.key;
+<% end -%>
+
+    location /local-static {
+        alias /home/aloha/local-static;
+    }
+
+    include /etc/nginx/aloha-include/certbot;
+    include /etc/nginx/aloha-include/app;
+}

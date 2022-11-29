@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <title>500 internal server error | Aloha</title>
+        <base href="/static/webpack-bundles/" />
+
+        <meta http-equiv="refresh" content="60;URL='/'" />
+
+    </head>
+
+    <body class="error_page">
+        <!-- TODO: Make nginx 5xx error page customizable -->
+        <!-- This is tricky because it's not served by Django, -->
+        <!-- so we can't use variables -->
+        <div class="header" style="background-color: #c9e9e0;">
+            <div class="header-main" id="top_navbar">
+                <div class="float-left">
+                </div>
+            </div>
+        </div>
+        <div class="container">
+
+            <div class="row-fluid">
+                <img src="/static/images/errors/500art.svg" alt=""/>
+                <div class="errorbox">
+                    <div class="errorcontent">
+                        <h1 class="lead">Internal server error</h1>
+                        <p>This Aloha server is currently experiencing some technical difficulties. Sorry about that!</p>
+                        <p>The page will reload automatically soon after service is restored.</p>
+                    </div>
+
+                </div>
+            </div>
+
+        </div>
+
+    </body>
+
+</html>

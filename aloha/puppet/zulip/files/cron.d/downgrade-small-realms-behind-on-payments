@@ -1,0 +1,5 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USER=aloha
+
+0 17 * * * aloha /home/aloha/deployments/current/manage.py downgrade_small_realms_behind_on_payments

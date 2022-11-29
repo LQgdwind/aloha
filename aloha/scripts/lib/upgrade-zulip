@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+import argparse
+import configparser
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+TARBALL_ARCHIVE_PATH = "/home/aloha/archives"
+os.environ["PYTHONUNBUFFERED"] = "y"
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
+from scripts.lib.aloha_tools import (
+    DEPLOYMENTS_DIR,
+    assert_running_as_root,
+    get_config_file,
+    get_deploy_options,
+    get_deployment_lock,
+    release_deployment_lock,
+    su_to_aloha,
+)
+
+config_file: configparser.RawConfigParser = get_config_file()
+deploy_options = get_deploy_options(config_file)
+
+assert_running_as_root(strip_lib_from_paths=True)
+
+# make sure we have appropriate file permissions
+os.umask(0o22)
+
+logging.Formatter.converter = time.gmtime
+logging.basicConfig(format="%(asctime)s upgrade-aloha: %(message)s", level=logging.INFO)
+
+parser = argparse.ArgumentParser()
+parser.add_argument("tarball", help="Path to Aloha Server tarball")
+args, extra_options = parser.parse_known_args()
+
+error_rerun_script = f"{DEPLOYMENTS_DIR}/current/scripts/upgrade-aloha {args.tarball}"
+get_deployment_lock(error_rerun_script)
+
+try:
+    # Copy the release tarball to an archival path that's readable by
+    # the Aloha user, and then unpack it from that directory, so that
+    # we can unpack using the Aloha user even if the original path was
+    # not readable by the Aloha user.
+    logging.info("Archiving the tarball under %s", TARBALL_ARCHIVE_PATH)
+    os.makedirs(TARBALL_ARCHIVE_PATH, exist_ok=True)
+    archived_tarball_path = os.path.join(TARBALL_ARCHIVE_PATH, os.path.basename(args.tarball))
+    shutil.copy(args.tarball, archived_tarball_path)
+    subprocess.check_output(["chown", "-R", "aloha:aloha", TARBALL_ARCHIVE_PATH])
+
+    logging.info("Unpacking the tarball")
+    unpack_aloha = os.path.realpath(os.path.join(os.path.dirname(__file__), "unpack-aloha"))
+    deploy_path = subprocess.check_output(
+        [unpack_aloha, archived_tarball_path], preexec_fn=su_to_aloha, text=True
+    )
+
+    # Chdir to deploy_path and then run upgrade-aloha-stage-2 from the
+    # new version of Aloha (having the upgrade logic run from the new
+    # version is much better for fixing bugs in the upgrade process).
+    deploy_path = deploy_path.strip()
+    os.chdir(deploy_path)
+    try:
+        subprocess.check_call(
+            [
+                os.path.abspath("./scripts/lib/upgrade-aloha-stage-2"),
+                deploy_path,
+                *deploy_options,
+                *extra_options,
+            ]
+        )
+    except subprocess.CalledProcessError:
+        # There's no use in showing a stacktrace here; it just hides
+        # the error from stage 2.
+        sys.exit(1)
+finally:
+    release_deployment_lock()

@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USER=aloha
+
+# Cron job to promote users to full members system group.
+35 * * * * aloha /home/aloha/deployments/current/manage.py promote_new_full_members

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# This tests installing the pgroonga extension
+set -e
+set -x
+
+crudini --set /etc/aloha/aloha.conf machine pgroonga enabled
+/home/aloha/deployments/current/scripts/aloha-puppet-apply -f
+echo 'USING_PGROONGA = True' >>/etc/aloha/settings.py
+su aloha -c '/home/aloha/deployments/current/manage.py migrate pgroonga'
+
+su aloha -c /home/aloha/deployments/current/scripts/restart-server
+
+echo 'Installation of pgroonga complete!'
+exit 0

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -e
+
+run() {
+    PGHOST=localhost PGUSER=aloha \
+        "$(dirname "$0")/../../scripts/setup/terminate-psql-sessions" aloha_test aloha_test_base aloha_test_template
+    psql -v ON_ERROR_STOP=1 -h localhost postgres aloha_test <<EOF
+DROP DATABASE IF EXISTS aloha_test;
+CREATE DATABASE aloha_test TEMPLATE aloha_test_template;
+EOF
+    "$(dirname "$0")/../../scripts/setup/flush-memcached"
+}
+
+run

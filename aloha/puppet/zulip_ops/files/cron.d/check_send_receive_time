@@ -1,0 +1,5 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+USER=aloha
+
+* * * * * aloha /usr/lib/nagios/plugins/aloha_app_frontend/check_send_receive_time --nagios --site=https://$(/home/aloha/deployments/current/scripts/get-django-setting NAGIOS_BOT_HOST) >/dev/null
